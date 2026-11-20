@@ -1,6 +1,6 @@
 {
   "name": "claude",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "description": "Use Claude Code from Codex: rescue tasks, Claude's built-in review, adversarial review, and an optional stop-time review gate, through the local `claude` CLI. Port of openai/codex-plugin-cc with roles swapped.",
   "author": {
     "name": "sngymgt"

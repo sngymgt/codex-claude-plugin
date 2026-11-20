@@ -40,7 +40,9 @@ const BILLING_ENV = [
   "CLAUDE_CODE_USE_FOUNDRY",
 ];
 
-// Codex の read-only サンドボックスに当たるもの。dontAsk は事前に許した道具以外を黙って断る
+// Codex の read-only サンドボックスに当たるもの。dontAsk は事前に許した道具以外を黙って断る。
+// git の参照系にも書き込み・実行のオプション（diff --output、grep -O 等）があるので、
+// この一覧だけでは守れない。書き込みを止めているのは SANDBOX_SETTINGS の方
 const READ_ONLY_TOOLS = [
   "Read",
   "Grep",
@@ -53,12 +55,11 @@ const READ_ONLY_TOOLS = [
   "Bash(git merge-base:*)",
   "Bash(git ls-files:*)",
   "Bash(git rev-parse:*)",
-  "Bash(git grep:*)",
-  "Bash(git branch:*)",
-  "Bash(git symbolic-ref:*)",
-  "Bash(ls:*)",
 ];
 const WRITE_TOOLS = ["Edit", "Write", "NotebookEdit"];
+const BUILTIN_TOOLS = ["Read", "Grep", "Glob", "Bash"];
+
+const JOB_ID = /^cl-[a-z0-9]+-[0-9a-f]{6}$/;
 
 const STOP_REVIEW_TIMEOUT_MS = 15 * 60 * 1000;
 const MAX_UNTRACKED_BYTES = 24 * 1024;
@@ -254,7 +255,16 @@ function jobsForThread(root, threadId, all = false) {
   return all || !threadId ? jobs : jobs.filter((j) => j.threadId === threadId);
 }
 
-const jobPath = (root, id) => path.join(stateDir(root), "jobs", `${id}.json`);
+function jobPath(root, id) {
+  // ID はそのままファイル名になる。`../` 等で状態の置き場の外を読み書きさせない
+  if (!JOB_ID.test(id)) die(`Invalid job ID: ${id}`);
+  return path.join(stateDir(root), "jobs", `${id}.json`);
+}
+
+function loadJob(root, id) {
+  const job = readJson(jobPath(root, id));
+  return job && job.id === id ? job : null;
+}
 
 function isAlive(pid) {
   try {
@@ -276,12 +286,49 @@ function isNested() {
 
 // ---------- Claude の呼び出し ----------
 
-function claudeBin() {
-  if (process.env.CLAUDE_BIN) return process.env.CLAUDE_BIN;
+const IS_WINDOWS = process.platform === "win32";
+
+// Bash を Claude Code のサンドボックスの中で動かす。許可した git の参照系にも書き込み・実行の
+// オプションがあるので、読むだけの実行では書き込みそのものを OS の側で止める
+// Codex の read-only / workspace-write サンドボックスと同じく、コマンドは何でも走らせてよいが、
+// 書き込みと通信は OS の側で止める。許可リストでコマンドを絞ると /code-review の複合コマンドが丸ごと断られる
+function sandboxSettings({ readOnly, cwd }) {
+  const sandbox = { enabled: true, autoAllowBashIfSandboxed: true, allowUnsandboxedCommands: false };
+  // サンドボックスは既定で作業フォルダに書ける。読むだけの実行ではそこも塞ぐ
+  if (readOnly) sandbox.filesystem = { denyWrite: [workspaceRoot(cwd)] };
+  return { sandbox };
+}
+
+function findOnPath(names) {
+  for (const dir of (process.env.PATH || "").split(path.delimiter).filter(Boolean)) {
+    for (const name of names) {
+      const p = path.join(dir, name);
+      if (fs.existsSync(p)) return p;
+    }
+  }
+  return null;
+}
+
+// { command, prefixArgs }。spawn はシェルを通さない（プロンプトや差分をシェルに解釈させない）
+function resolveClaude() {
+  if (process.env.CLAUDE_BIN) return { command: process.env.CLAUDE_BIN, prefixArgs: [] };
   // シェルのラッパー（cmux 等）が `claude` を横取りすると -p が素通りしないことがあるので、
   // 公式インストーラの置き場所を先に見る。
-  const native = path.join(os.homedir(), ".local", "bin", "claude");
-  return fs.existsSync(native) ? native : "claude";
+  const native = path.join(os.homedir(), ".local", "bin", IS_WINDOWS ? "claude.exe" : "claude");
+  if (fs.existsSync(native)) return { command: native, prefixArgs: [] };
+  if (!IS_WINDOWS) return { command: "claude", prefixArgs: [] };
+  const exe = findOnPath(["claude.exe"]);
+  if (exe) return { command: exe, prefixArgs: [] };
+  // npm の claude.cmd は Node がシェル無しでは起動しないので、包んでいる cli.js を node で直接起動する
+  const cmd = findOnPath(["claude.cmd"]);
+  const cli = cmd && path.join(path.dirname(cmd), "node_modules", "@anthropic-ai", "claude-code", "cli.js");
+  if (cli && fs.existsSync(cli)) return { command: process.execPath, prefixArgs: [cli] };
+  return { command: "claude.exe", prefixArgs: [] };
+}
+
+function spawnClaudeSync(args) {
+  const { command, prefixArgs } = resolveClaude();
+  return spawnSync(command, [...prefixArgs, ...args], { encoding: "utf8", env: claudeEnv(), windowsHide: true });
 }
 
 function claudeEnv() {
@@ -293,9 +340,9 @@ function claudeEnv() {
 }
 
 function claudeAvailability() {
-  const v = spawnSync(claudeBin(), ["--version"], { encoding: "utf8", env: claudeEnv() });
+  const v = spawnClaudeSync(["--version"]);
   if (v.status !== 0) return { available: false, detail: "claude CLI not found or not runnable" };
-  const auth = spawnSync(claudeBin(), ["auth", "status"], { encoding: "utf8", env: claudeEnv() });
+  const auth = spawnClaudeSync(["auth", "status"]);
   try {
     const a = JSON.parse(auth.stdout);
     if (!a.loggedIn) return { available: false, version: v.stdout.trim(), detail: "not logged in (run `claude auth login`)" };
@@ -305,13 +352,19 @@ function claudeAvailability() {
   }
 }
 
-function buildClaudeArgs({ prompt, write, sessionId, model, effort, schemaFile, persist = true }) {
-  const args = ["-p", prompt, "--output-format", "json"];
+// プロンプトは標準入力で渡す（Windows のコマンドラインは 32K 文字までで、差分を埋め込むと溢れる）。
+// --restricted でユーザー・リポジトリの settings を読まない。読むと、その allow（例: 外部サービスに書く CLI）が
+// dontAsk でもそのまま通る。--strict-mcp-config で MCP サーバーも読まない
+function buildClaudeArgs({ write, sessionId, model, effort, schemaFile, persist = true }, cwd) {
+  const args = ["-p", "--output-format", "json", "--restricted", "--strict-mcp-config"];
   if (!persist) args.push("--no-session-persistence");
   if (write) {
+    args.push("--tools", ...BUILTIN_TOOLS, ...WRITE_TOOLS);
+    args.push("--settings", JSON.stringify(sandboxSettings({ readOnly: false, cwd })));
     args.push("--permission-mode", "acceptEdits", "--allowedTools", ...READ_ONLY_TOOLS, ...WRITE_TOOLS);
   } else {
-    // ユーザー設定の allow も効くので、書き込み系は明示的に塞いでおく
+    args.push("--tools", ...BUILTIN_TOOLS);
+    args.push("--settings", JSON.stringify(sandboxSettings({ readOnly: true, cwd })));
     args.push("--permission-mode", "dontAsk", "--allowedTools", ...READ_ONLY_TOOLS, "--disallowedTools", ...WRITE_TOOLS);
   }
   if (schemaFile) args.push("--json-schema", fs.readFileSync(path.join(PLUGIN_ROOT, "schemas", schemaFile), "utf8"));
@@ -323,7 +376,14 @@ function buildClaudeArgs({ prompt, write, sessionId, model, effort, schemaFile, 
 
 function runClaude(spec, cwd, { timeoutMs } = {}) {
   return new Promise((resolve) => {
-    const child = spawn(claudeBin(), buildClaudeArgs(spec), { cwd, env: claudeEnv(), stdio: ["ignore", "pipe", "pipe"] });
+    const { command, prefixArgs } = resolveClaude();
+    const child = spawn(command, [...prefixArgs, ...buildClaudeArgs(spec, cwd)], {
+      cwd,
+      env: claudeEnv(),
+      stdio: ["pipe", "pipe", "pipe"],
+      windowsHide: true,
+    });
+    child.stdin.end(spec.prompt);
     let out = "";
     let err = "";
     let timedOut = false;
@@ -459,7 +519,12 @@ async function startJob(root, job, background) {
   const p = jobPath(root, job.id);
   writeJson(p, { ...job, status: "queued" });
   if (background) {
-    const child = spawn(process.execPath, [SELF, "__run-job", p], { detached: true, stdio: "ignore", env: process.env });
+    const child = spawn(process.execPath, [SELF, "__run-job", p], {
+      detached: true,
+      stdio: "ignore",
+      env: process.env,
+      windowsHide: true,
+    });
     child.unref();
     console.log(`Claude ${job.title} started in the background as ${job.id}.\nCheck progress: status ${job.id} --wait`);
     return;
@@ -569,7 +634,7 @@ async function cmdStatus(argv) {
     return;
   }
   const p = jobPath(root, id);
-  let job = readJson(p) ?? die(`Unknown job: ${id}`);
+  let job = loadJob(root, id) ?? die(`Unknown job: ${id}`);
   const deadline = Date.now() + Number(opts["timeout-sec"] || 240) * 1000;
   while (opts.wait && ["queued", "running"].includes(effectiveStatus(job)) && Date.now() < deadline) {
     await new Promise((r) => setTimeout(r, 2000));
@@ -585,7 +650,7 @@ function cmdResult(argv) {
   const { opts, rest } = parseArgs(argv);
   const root = workspaceRoot(path.resolve(opts.cwd || process.cwd()));
   const job = rest[0]
-    ? readJson(jobPath(root, rest[0]))
+    ? loadJob(root, rest[0])
     : jobsForThread(root, currentThreadId()).find((j) => ["completed", "failed"].includes(j.status));
   if (!job) die(rest[0] ? `Unknown job: ${rest[0]}` : "No finished Claude job in this Codex thread.");
   if (!job.rendered) die(`No result yet (${effectiveStatus(job)}).`);
@@ -593,6 +658,12 @@ function cmdResult(argv) {
 }
 
 function terminate(pid) {
+  if (!Number.isInteger(pid) || pid <= 1) return;
+  if (IS_WINDOWS) {
+    // Windows にプロセスグループへの kill は無い。子の claude ごと止めるには taskkill /T
+    spawnSync("taskkill", ["/PID", String(pid), "/T", "/F"], { windowsHide: true });
+    return;
+  }
   try {
     // __run-job は detached で起動しているのでプロセスグループごと止める（子の claude も含む）
     process.kill(-pid, "SIGTERM");
@@ -609,7 +680,7 @@ function cmdCancel(argv) {
   const { opts, rest } = parseArgs(argv);
   const root = workspaceRoot(path.resolve(opts.cwd || process.cwd()));
   const job = rest[0]
-    ? readJson(jobPath(root, rest[0]))
+    ? loadJob(root, rest[0])
     : jobsForThread(root, currentThreadId()).find((j) => ["queued", "running"].includes(j.status));
   if (!job) die(rest[0] ? `Unknown job: ${rest[0]}` : "No running Claude job in this Codex thread.");
   if (!["queued", "running"].includes(job.status)) die(`Job ${job.id} is not running (${job.status}).`);
