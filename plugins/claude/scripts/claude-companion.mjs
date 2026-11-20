@@ -109,7 +109,8 @@ function die(msg, code = 1) {
 
 // ---------- git ----------
 
-const git = (cwd, ...args) => spawnSync("git", args, { cwd, encoding: "utf8", maxBuffer: 256 * 1024 * 1024 });
+const git = (cwd, ...args) =>
+  spawnSync(gitBin(), args, { cwd, encoding: "utf8", maxBuffer: 256 * 1024 * 1024, env: safeSpawnEnv(process.env), windowsHide: true });
 
 function gitChecked(cwd, ...args) {
   const r = git(cwd, ...args);
@@ -299,8 +300,10 @@ function sandboxSettings({ readOnly, cwd }) {
   return { sandbox };
 }
 
+// Windows は名前だけで起動すると作業フォルダを先に探す。レビュー中のリポジトリに置かれた
+// git.exe / claude.exe を動かさないよう、PATH の絶対パスの場所だけから探して絶対パスで起動する
 function findOnPath(names) {
-  for (const dir of (process.env.PATH || "").split(path.delimiter).filter(Boolean)) {
+  for (const dir of (process.env.PATH || "").split(path.delimiter).filter((d) => d && path.isAbsolute(d))) {
     for (const name of names) {
       const p = path.join(dir, name);
       if (fs.existsSync(p)) return p;
@@ -323,7 +326,28 @@ function resolveClaude() {
   const cmd = findOnPath(["claude.cmd"]);
   const cli = cmd && path.join(path.dirname(cmd), "node_modules", "@anthropic-ai", "claude-code", "cli.js");
   if (cli && fs.existsSync(cli)) return { command: process.execPath, prefixArgs: [cli] };
-  return { command: "claude.exe", prefixArgs: [] };
+  throw new Error("claude CLI not found. Install Claude Code (claude.exe) or set CLAUDE_BIN to its absolute path.");
+}
+
+let gitPath = null;
+function gitBin() {
+  if (!IS_WINDOWS) return "git";
+  gitPath ??= findOnPath(["git.exe"]);
+  if (!gitPath) throw new Error("git.exe not found on PATH.");
+  return gitPath;
+}
+
+function safeSpawnEnv(env) {
+  // 子のプロセスが名前だけでコマンドを探すときも、作業フォルダを候補にさせない
+  return IS_WINDOWS ? { ...env, NoDefaultCurrentDirectoryInExePath: "1" } : env;
+}
+
+// Claude Code のサンドボックスは macOS（sandbox-exec）と Linux（bubblewrap＋socat）だけ。
+// 使えない所で Bash を渡すと、読むだけの実行でも書き込みが止まらないので渡さない
+function sandboxAvailable() {
+  if (process.platform === "darwin") return true;
+  if (process.platform === "linux") return !!(findOnPath(["bwrap"]) && findOnPath(["socat"]));
+  return false;
 }
 
 function spawnClaudeSync(args) {
@@ -336,10 +360,15 @@ function claudeEnv() {
   for (const k of BILLING_ENV) delete env[k];
   // 起動元のアプリの値を引き継ぐと、その履歴の一覧に会話が混ざる
   delete env.CLAUDE_CODE_ENTRYPOINT;
-  return env;
+  return safeSpawnEnv(env);
 }
 
 function claudeAvailability() {
+  try {
+    resolveClaude();
+  } catch (e) {
+    return { available: false, detail: e.message };
+  }
   const v = spawnClaudeSync(["--version"]);
   if (v.status !== 0) return { available: false, detail: "claude CLI not found or not runnable" };
   const auth = spawnClaudeSync(["auth", "status"]);
@@ -357,13 +386,14 @@ function claudeAvailability() {
 // dontAsk でもそのまま通る。--strict-mcp-config で MCP サーバーも読まない
 function buildClaudeArgs({ write, sessionId, model, effort, schemaFile, persist = true }, cwd) {
   const args = ["-p", "--output-format", "json", "--restricted", "--strict-mcp-config"];
+  const tools = sandboxAvailable() ? BUILTIN_TOOLS : BUILTIN_TOOLS.filter((t) => t !== "Bash");
   if (!persist) args.push("--no-session-persistence");
   if (write) {
-    args.push("--tools", ...BUILTIN_TOOLS, ...WRITE_TOOLS);
+    args.push("--tools", ...tools, ...WRITE_TOOLS);
     args.push("--settings", JSON.stringify(sandboxSettings({ readOnly: false, cwd })));
     args.push("--permission-mode", "acceptEdits", "--allowedTools", ...READ_ONLY_TOOLS, ...WRITE_TOOLS);
   } else {
-    args.push("--tools", ...BUILTIN_TOOLS);
+    args.push("--tools", ...tools);
     args.push("--settings", JSON.stringify(sandboxSettings({ readOnly: true, cwd })));
     args.push("--permission-mode", "dontAsk", "--allowedTools", ...READ_ONLY_TOOLS, "--disallowedTools", ...WRITE_TOOLS);
   }
@@ -661,7 +691,8 @@ function terminate(pid) {
   if (!Number.isInteger(pid) || pid <= 1) return;
   if (IS_WINDOWS) {
     // Windows にプロセスグループへの kill は無い。子の claude ごと止めるには taskkill /T
-    spawnSync("taskkill", ["/PID", String(pid), "/T", "/F"], { windowsHide: true });
+    const taskkill = path.join(process.env.SystemRoot || "C:\\Windows", "System32", "taskkill.exe");
+    spawnSync(taskkill, ["/PID", String(pid), "/T", "/F"], { windowsHide: true });
     return;
   }
   try {
@@ -726,6 +757,7 @@ function cmdSetup(argv) {
     `- claude: ${claude.version ?? claude.detail}`,
     `- auth: ${claude.available ? `${claude.authMethod}${claude.subscription ? ` (${claude.subscription})` : ""}` : claude.detail}`,
     `- review gate: ${report.reviewGateEnabled ? "enabled" : "disabled"}`,
+    `- sandbox: ${sandboxAvailable() ? "available" : "unavailable (Claude runs without Bash: no git commands, review and gate see files only)"}`,
   ];
   if (billing.length) out.push(`- billing env: ${billing.join(", ")} present; removed when launching claude`);
   if (actions.length) out.push("", "Actions taken:", ...actions.map((a) => `- ${a}`));

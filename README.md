@@ -62,11 +62,17 @@ Claude Code 用の [openai/codex-plugin-cc](https://github.com/openai/codex-plug
 macOS でだけ動作を確かめている。Windows 向けに次の手当てはしてあるが、**実機では一度も動かしていない**。
 
 - フックは `commandWindows` で、シェルの変数展開（`$PLUGIN_ROOT` / `%PLUGIN_ROOT%`）に頼らず node が環境変数を読む形にした。
+  `PLUGIN_ROOT` が無い・相対パスのときは何もせず終わる（リポジトリに置かれたファイルを読み込まないため）。
   Windows で Codex がフックをどのシェルで動かすか、`PLUGIN_ROOT` が環境変数として渡るかは公式の説明に書かれていない
-- `claude.exe` を探す。npm で入れた `claude.cmd` は Node がシェル無しで起動しないので、隣の `node_modules/@anthropic-ai/claude-code/cli.js` を node で起動する（npm の版の中身が変わっていれば動かない）
+- `claude.exe`・`git.exe` は PATH の絶対パスの場所だけから探して絶対パスで起動し、見つからなければ止める
+  （Windows は名前だけで起動すると作業フォルダを先に探すので、リポジトリに置かれた偽物が動く）。`taskkill` は System32 のもの
+- npm で入れた `claude.cmd` は Node がシェル無しで起動しないので、隣の `node_modules/@anthropic-ai/claude-code/cli.js` を node で起動する（npm の版の中身が変わっていれば動かない）
 - `cancel` とセッション終了の片付けは `taskkill /T /F` で子の claude ごと止める
 - バックグラウンド実行と claude の起動は `windowsHide` でコンソールの窓を出さない
-- Claude Code のサンドボックスは Windows では動かない可能性がある（公式は macOS・Linux・WSL2 を挙げている）。その場合、読むだけの実行でも書き込みが止まらないので注意
+- **Claude Code のサンドボックスが使えない環境（Windows、bubblewrap・socat の無い Linux）では Claude に Bash を渡さない。**
+  渡すと読むだけの実行でも書き込みが止まらないため。その代わり git が使えないので、組み込みレビュー（`/code-review`）と
+  Stop ゲートは差分を見られずファイルの中身だけで判断する。adversarial-review は差分をプロンプトに埋め込むので、
+  2 ファイル・256KB までなら差分を見られる。`claude-setup` の `sandbox:` の行で分かる
 
 ## Stop ゲート
 
