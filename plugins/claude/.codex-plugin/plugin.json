@@ -1,0 +1,24 @@
+{
+  "name": "claude",
+  "version": "0.3.1",
+  "description": "Use Claude Code from Codex: rescue tasks, Claude's built-in review, adversarial review, and an optional stop-time review gate, through the local `claude` CLI. Port of openai/codex-plugin-cc with roles swapped.",
+  "author": {
+    "name": "sngymgt"
+  },
+  "license": "Apache-2.0",
+  "keywords": [
+    "claude",
+    "claude-code",
+    "review",
+    "delegation",
+    "rescue"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Claude Code",
+    "shortDescription": "Ask Claude Code for a second opinion or a review",
+    "longDescription": "Runs the locally installed Claude Code CLI in headless mode. Claude reads the repository (read-only by default) and its answer comes back to Codex. Supports background jobs and resuming the last Claude session per repository.",
+    "developerName": "sngymgt",
+    "category": "Developer Tools"
+  }
+}

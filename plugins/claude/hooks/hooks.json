@@ -1,0 +1,29 @@
+{
+  "description": "Optional stop-time review gate for the Claude companion, plus job cleanup at session end.",
+  "hooks": {
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$PLUGIN_ROOT/scripts/claude-companion.mjs\" session-end",
+            "statusMessage": "Claude のジョブを片付けています",
+            "timeout": 3
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$PLUGIN_ROOT/scripts/claude-companion.mjs\" stop-gate",
+            "statusMessage": "Claude が変更を確認しています（レビューゲート）",
+            "timeout": 900
+          }
+        ]
+      }
+    ]
+  }
+}
