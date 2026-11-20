@@ -1,5 +1,7 @@
 # codex-claude-plugin
 
+A Codex plugin for using Claude Code from Codex — a role-swapped port of openai/codex-plugin-cc (docs in Japanese).
+
 Codex から Claude Code を呼ぶための Codex プラグイン。
 Claude Code 用の [openai/codex-plugin-cc](https://github.com/openai/codex-plugin-cc)（Claude から Codex を呼ぶ）を、
 役割を入れ替えて写したもの。**プロンプト・スキル・ゲートの動きは元のまま**にし、Codex と Claude Code の
@@ -42,14 +44,14 @@ Claude Code 用の [openai/codex-plugin-cc](https://github.com/openai/codex-plug
 | フックに `statusMessage` を付ける | Codex の `/hooks` はこれをフックの名前として出す。無いと「unnamed」になり見分けられない |
 | `~/.local/bin/claude`（Windows は `claude.exe`、npm の `claude.cmd` は中の `cli.js`）を優先して起動 | シェルのラッパー（cmux）が `claude` を横取りする環境がある |
 
-### 私たちの判断で足したもの
+### このプラグインで足したもの
 
 | 足したもの | 理由 |
 |---|---|
 | `ANTHROPIC_API_KEY` などを外して起動 | 環境に API キーがあると `claude -p` が黙って従量課金になる |
 | `CLAUDE_CODE_ENTRYPOINT` を外して起動 | 起動元のアプリの履歴に会話が混ざる |
 | Stop ゲートの判定は会話を保存しない（`--no-session-persistence`） | 判定は使い捨てで、ターンごとにファイルが溜まる |
-| Claude Code の中から呼ばれたら止まる | このマシンには元のプラグインも入っており、Claude ↔ Codex で呼び合う |
+| Claude Code の中から呼ばれたら止まる | 元のプラグイン（Claude から Codex を呼ぶ）と両方を入れていると、Claude ↔ Codex で呼び合って止まらなくなる |
 
 ### 移していないもの
 
@@ -99,12 +101,14 @@ macOS でだけ動作を確かめている。Windows 向けに次の手当ては
 ### 1. マーケットプレイスを登録してプラグインを入れる
 
 ```bash
-codex plugin marketplace add ~/Dev/personal/codex-claude-plugin
+codex plugin marketplace add sngymgt/codex-claude-plugin
 ```
 
 ```bash
 codex plugin add claude@codex-claude
 ```
+
+手元に clone して入れるなら、`marketplace add` にそのフォルダのパスを渡す。
 
 `codex plugin list` で `claude@codex-claude  installed, enabled` と出れば入っている。
 デスクトップアプリは起動中に入れたプラグインを読まないので、Cmd+Q で終了して開き直す。
@@ -146,15 +150,19 @@ codex -s workspace-write -c sandbox_workspace_write.network_access=true \
   --add-dir ~/.local/state/codex-claude --add-dir ~/.claude
 ```
 
-### 直したとき
+### 更新するとき
 
-Codex は `~/.codex/plugins/cache/codex-claude/claude/<version>/` に写して使うので、元を直しても反映されない。
-`plugin.json` の `version` を上げてから入れ直す:
+Codex は `~/.codex/plugins/cache/codex-claude/claude/<version>/` に写して使うので、マーケットプレイスを更新してから入れ直す:
+
+```bash
+codex plugin marketplace upgrade codex-claude
+```
 
 ```bash
 codex plugin remove claude@codex-claude && codex plugin add claude@codex-claude
 ```
 
+手元のフォルダから入れている場合は `upgrade` は要らない（`plugin.json` の `version` を上げてから入れ直す）。
 フックかスクリプトが変わると、フックは「変更あり」になり、3. の信頼をやり直す必要がある。
 
 ## ライセンス
