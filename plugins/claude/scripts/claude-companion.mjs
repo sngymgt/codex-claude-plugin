@@ -790,6 +790,7 @@ function parseStopReviewOutput(text) {
 
 async function cmdStopGate() {
   const input = readHookInput();
+  if (input.stop_hook_active === true) return;
   const cwd = input.cwd || process.cwd();
   if (isNested() || git(cwd, "rev-parse", "--show-toplevel").status !== 0) return;
   const root = workspaceRoot(cwd);
@@ -835,7 +836,7 @@ async function cmdStopGate() {
 function cmdSessionEnd() {
   const input = readHookInput();
   const cwd = input.cwd || process.cwd();
-  if (!input.session_id || git(cwd, "rev-parse", "--show-toplevel").status !== 0) return;
+  if (!input.session_id) return;
   const root = workspaceRoot(cwd);
   for (const job of jobsForThread(root, input.session_id)) {
     if (["queued", "running"].includes(job.status) && job.pid) terminate(job.pid);
